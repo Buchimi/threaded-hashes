@@ -15,13 +15,14 @@ void Usage(char *);
 uint32_t jenkins_one_at_a_time_hash(const uint8_t *, uint64_t);
 uint32_t findHash(void *args);
 void slice(const char *str, char *result, size_t start, size_t end);
-
+void constructArgs(struct args *argument, int threadNo, int max, uint8_t *mapping);
 // block size
 #define BSIZE 4096
 struct args
 {
   int threadNo;
   int max;
+  uint8_t *mmapLink;
 };
 
 int main(int argc, char **argv)
@@ -46,16 +47,15 @@ int main(int argc, char **argv)
   fstat(fd, &stats);
   // calculate nblocks
 
-  uint8_t *str = (uint8_t *)mmap(NULL, stats.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  uint8_t *map = (uint8_t *)mmap(NULL, stats.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   printf(" no. of blocks = %u \n", nblocks);
 
   // double start = GetTime();
 
   // calculate hash value of the input file
   int threadNo = 0;
-  struct args *argumets = (struct args *)malloc(sizeof(struct args));
-  argumets->max = 6;
-  argumets->threadNo = threadNo;
+  struct args *argumets;
+  constructArgs(argumets, threadNo, 6, map);
 
   findHash((void *)argumets);
 
@@ -153,4 +153,13 @@ int isLeaf(int nodeNo, int max)
     return 1;
   }
   return 0;
+}
+
+void constructArgs(struct args *argument, int threadNo, int max, uint8_t *mapping)
+{
+  argument = (struct args *)malloc(sizeof(struct args));
+  argument->max = max;
+  int rightThreadNo = threadNo * 2 + 2;
+  argument->threadNo = rightThreadNo;
+  argument->mmapLink = mapping;
 }
