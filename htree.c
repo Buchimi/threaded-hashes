@@ -7,9 +7,12 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/mman.h>
 #include <pthread.h>
-
+#include <string.h>
+#include <sys/time.h>
+#include <assert.h>
 // Print out the usage of the program and exit.
 
 // block size
@@ -17,7 +20,7 @@
 typedef struct args
 {
   int threadNo;
-  int max;
+  int maxNoThreads;
   uint8_t *mmapLink;
   int length;
 } args;
@@ -25,10 +28,10 @@ typedef struct args
 void Usage(char *);
 uint32_t jenkins_one_at_a_time_hash(const uint8_t *, uint64_t);
 uint32_t findHash(void *args);
-void slice(const char *str, char *result, size_t start, size_t end);
-void constructArgs(args *argument, int threadNo, int max, uint8_t *mapping, int length);
-u_int32_t internalNodeHash(uint32_t *str, uint32_t *lefthash, uint32_t *rightHash, uint64_t length);
-uint32_t hashnode(char *str, uint64_t length);
+args *constructArgs(args *argument, int threadNo, int maxNoThreads, uint8_t *mapping, int length);
+u_int32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHash);
+double GetTime();
+uint32_t hashnode(args *thread, int blockperthread);
 
 int main(int argc, char **argv)
 {
@@ -52,76 +55,90 @@ int main(int argc, char **argv)
   fstat(fd, &stats);
   // calculate nblocks
 
-  int blocksperthread = stats.st_blocks / atoi(argv[2]);
+  nblocks = stats.st_size / BSIZE;
+  int blocksperthread = nblocks / atoi(argv[2]);
 
   uint8_t *map = (uint8_t *)mmap(NULL, stats.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  printf(" no. of blocks = %u \n", nblocks);
+  printf("no. of blocks = %u \n", nblocks);
 
-  // double start = GetTime();
+  double start = GetTime();
 
   // calculate hash value of the input file
   int threadNo = 0;
-  struct args *argumets;
-  constructArgs(argumets, threadNo, 6, map, blocksperthread);
+  args *arguments;
+  arguments = constructArgs(arguments, threadNo, atoi(argv[2]), map, blocksperthread);
+  printf("The number of threads: %d\n", arguments->length);
+  hash = findHash((void *)arguments);
 
-  findHash((void *)argumets);
-
-  // double end = GetTime();
+  double end = GetTime();
   printf("hash value = %u \n", hash);
-  // printf("time taken = %f \n", (end - start));
+  printf("time taken = %f \n", (end - start));
   close(fd);
   return EXIT_SUCCESS;
 }
 
-uint32_t findHash(void *args)
+uint32_t findHash(void *threadArgs)
 {
   pthread_t left;
   pthread_t right;
-  struct args argu = *((struct args *)args);
-
-  // get the slice of string
-  char *stringSlice;
-  slice(argu.mmapLink, stringSlice, argu.threadNo * BSIZE, (argu.threadNo + 1) * BSIZE);
+  args argu = *((args *)threadArgs);
 
   // hash your data
 
-  uint32_t hash;
+  uint32_t *hash = malloc(sizeof(uint32_t));
   uint32_t *lefthash = NULL;
   uint32_t *righthash = NULL;
 
-  int max = ((struct args *)args)->max;
-  int threadNo = (((struct args *)args)->threadNo);
-  int bpt = (((struct args *)args)->length);
+  int maxNoThreads = ((args *)threadArgs)->maxNoThreads;
+  int threadNo = (((args *)threadArgs)->threadNo);
+  int bpt = (((args *)threadArgs)->length);
 
-  struct args *leftArgs;
-  constructArgs(leftArgs, threadNo * 2 + 1, max, argu.mmapLink, bpt);
+  args *leftArgs;
+  leftArgs = constructArgs(leftArgs, threadNo * 2 + 1, maxNoThreads, argu.mmapLink, bpt);
 
-  struct args *rightArgs;
-  constructArgs(rightArgs, threadNo * 2 + 2, max, argu.mmapLink, bpt);
+  args *rightArgs;
+  rightArgs = constructArgs(rightArgs, threadNo * 2 + 2, maxNoThreads, argu.mmapLink, bpt);
 
-  if (leftArgs->threadNo < max)
+  *hash = hashnode(&argu, bpt);
+
+  if (leftArgs->threadNo < maxNoThreads)
   {
     int success = pthread_create(&left, NULL, &findHash, (void *)leftArgs);
-    printf("Got to 1\n");
   }
   else
   {
     // child node
-    hash = hashnode(stringSlice, bpt);
-    pthread_exit(&hash);
+    if (argu.threadNo == 0)
+    {
+      return *hash;
+    }
+
+    pthread_exit(hash);
   }
 
-  if ((rightArgs->threadNo) < max)
+  if ((rightArgs->threadNo) < maxNoThreads)
   {
     int success = pthread_create(&right, NULL, &findHash, (void *)rightArgs);
-    printf("Got to 2\n");
   }
-  pthread_join(left, lefthash);
-  pthread_join(right, righthash);
 
-  hash = internalNodeHash(stringSlice, lefthash, righthash, bpt);
+  if (left != NULL)
+  {
 
-  pthread_exit(&hash);
+    pthread_join(left, (void **)&lefthash);
+  }
+
+  if (right != NULL)
+  {
+    pthread_join(right, (void **)&righthash);
+  }
+  uint32_t temp = internalNodeHash(*hash, lefthash, righthash);
+  *hash = temp;
+
+  if (argu.threadNo == 0)
+  {
+    return *hash;
+  }
+  pthread_exit(hash);
   // return val;
 }
 
@@ -149,51 +166,59 @@ void Usage(char *s)
   exit(EXIT_FAILURE);
 }
 
-void slice(const char *str, char *result, size_t start, size_t end)
+uint32_t hashnode(args *thread, int blockperthread)
 {
-  strncpy(result, str + start, end - start);
+  int offset = thread->threadNo * blockperthread * BSIZE;
+  const uint8_t *inte = (const uint8_t *)(&(thread->mmapLink[offset]));
+  int len = blockperthread * BSIZE;
+  return jenkins_one_at_a_time_hash(inte, len);
 }
 
-uint32_t hashnode(char *str, uint64_t length)
+u_int32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHash)
 {
-  const uint8_t *inte = (const uint8_t *)str;
-  return jenkins_one_at_a_time_hash(inte, length);
-}
+  char *hash_string;
 
-u_int32_t internalNodeHash(uint32_t *str, uint32_t *lefthash, uint32_t *rightHash, uint64_t length)
-{
   if (rightHash == NULL)
   {
+    hash_string = malloc(21);
+    sprintf(hash_string, "%u%u", hash, *lefthash);
   }
   else
   {
-    const uint8_t *inte = (const uint8_t *)str;
-    uint32_t hash = jenkins_one_at_a_time_hash(inte, length);
-    char *hash_string = malloc(31);
-    sprintf(hash_string, "%u%u%u", hash, lefthash, rightHash);
-
-    uint32_t value = jenkins_one_at_a_time_hash(hash_string, length);
-    free(hash_string);
-    return value;
+    hash_string = malloc(31);
+    sprintf(hash_string, "%u%u%u", hash, *lefthash, *rightHash);
   }
+  int len = strlen(hash_string);
+  uint32_t value = jenkins_one_at_a_time_hash((uint8_t *)hash_string, strlen(hash_string));
+  // free(hash_string);
+  return value;
 }
 
-int isLeaf(int nodeNo, int max)
+int isLeaf(int nodeNo, int maxNoThreads)
 {
-  if (nodeNo * 2 + 1 <= max)
+  if (nodeNo * 2 + 1 <= maxNoThreads)
   {
     return 1;
   }
   return 0;
 }
 
-void constructArgs(args *argument, int threadNo, int max, uint8_t *mapping, int length)
+args *constructArgs(args *argument, int threadNo, int maxNoThreads, uint8_t *mapping, int length)
 {
-  argument = (struct args *)malloc(sizeof(struct args));
+  argument = (args *)malloc(sizeof(args));
 
-  argument->max = max;
-  int rightThreadNo = threadNo * 2 + 2;
-  argument->threadNo = rightThreadNo;
+  argument->maxNoThreads = maxNoThreads;
+
+  argument->threadNo = threadNo;
   argument->mmapLink = mapping;
   argument->length = length;
+  return argument;
+}
+
+double GetTime()
+{
+  struct timeval t;
+  int rc = gettimeofday(&t, NULL);
+  assert(rc == 0);
+  return (double)t.tv_sec + (double)t.tv_usec / 1e6;
 }
