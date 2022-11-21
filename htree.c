@@ -27,9 +27,9 @@ typedef struct args
 
 void Usage(char *);
 uint32_t jenkins_one_at_a_time_hash(const uint8_t *, uint64_t);
-uint32_t findHash(void *args);
+void *findHash(void *args);
 args *constructArgs(args *argument, int threadNo, int maxNoThreads, uint8_t *mapping, int length);
-u_int32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHash);
+uint32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHash);
 double GetTime();
 uint32_t hashnode(args *thread, int blockperthread);
 
@@ -65,10 +65,10 @@ int main(int argc, char **argv)
 
   // calculate hash value of the input file
   int threadNo = 0;
-  args *arguments;
+  args *arguments = NULL;
   arguments = constructArgs(arguments, threadNo, atoi(argv[2]), map, blocksperthread);
-  printf("The number of threads: %d\n", arguments->length);
-  hash = findHash((void *)arguments);
+  printf("Blocks per thread: %d\n", arguments->length);
+  hash = *(uint32_t *)findHash((void *)arguments);
 
   double end = GetTime();
   printf("hash value = %u \n", hash);
@@ -77,10 +77,10 @@ int main(int argc, char **argv)
   return EXIT_SUCCESS;
 }
 
-uint32_t findHash(void *threadArgs)
+void *findHash(void *threadArgs)
 {
-  pthread_t left;
-  pthread_t right;
+  pthread_t left = 0;
+  pthread_t right = 0;
   args argu = *((args *)threadArgs);
 
   // hash your data
@@ -93,24 +93,28 @@ uint32_t findHash(void *threadArgs)
   int threadNo = (((args *)threadArgs)->threadNo);
   int bpt = (((args *)threadArgs)->length);
 
-  args *leftArgs;
+  args *leftArgs = NULL;
   leftArgs = constructArgs(leftArgs, threadNo * 2 + 1, maxNoThreads, argu.mmapLink, bpt);
 
-  args *rightArgs;
+  args *rightArgs = NULL;
   rightArgs = constructArgs(rightArgs, threadNo * 2 + 2, maxNoThreads, argu.mmapLink, bpt);
-
-  *hash = hashnode(&argu, bpt);
 
   if (leftArgs->threadNo < maxNoThreads)
   {
-    int success = pthread_create(&left, NULL, &findHash, (void *)leftArgs);
+    int success = pthread_create(&left, NULL, findHash, (void *)leftArgs);
+    if (success == 1)
+    {
+      perror("Failed to create thread");
+      exit(1);
+    }
   }
   else
   {
+    *hash = hashnode(&argu, bpt);
     // child node
     if (argu.threadNo == 0)
     {
-      return *hash;
+      return hash;
     }
 
     pthread_exit(hash);
@@ -118,25 +122,30 @@ uint32_t findHash(void *threadArgs)
 
   if ((rightArgs->threadNo) < maxNoThreads)
   {
-    int success = pthread_create(&right, NULL, &findHash, (void *)rightArgs);
+    pthread_create(&right, NULL, findHash, (void *)rightArgs);
   }
 
-  if (left != NULL)
+  *hash = hashnode(&argu, bpt);
+  if (left != 0)
   {
 
     pthread_join(left, (void **)&lefthash);
   }
 
-  if (right != NULL)
+  if (right != 0)
   {
     pthread_join(right, (void **)&righthash);
   }
-  uint32_t temp = internalNodeHash(*hash, lefthash, righthash);
+  uint32_t temp = 0;
+  if (lefthash != NULL){
+
+    temp = internalNodeHash(*hash, lefthash, righthash);
+  }
   *hash = temp;
 
   if (argu.threadNo == 0)
   {
-    return *hash;
+    return hash;
   }
   pthread_exit(hash);
   // return val;
@@ -168,13 +177,17 @@ void Usage(char *s)
 
 uint32_t hashnode(args *thread, int blockperthread)
 {
-  int offset = thread->threadNo * blockperthread * BSIZE;
+  uint32_t offset = thread->threadNo;
+  offset *= blockperthread * BSIZE;
   const uint8_t *inte = (const uint8_t *)(&(thread->mmapLink[offset]));
-  int len = blockperthread * BSIZE;
+
+  uint64_t len = BSIZE;
+  len *= blockperthread;
+
   return jenkins_one_at_a_time_hash(inte, len);
 }
 
-u_int32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHash)
+uint32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHash)
 {
   char *hash_string;
 
@@ -188,7 +201,6 @@ u_int32_t internalNodeHash(uint32_t hash, uint32_t *lefthash, uint32_t *rightHas
     hash_string = malloc(31);
     sprintf(hash_string, "%u%u%u", hash, *lefthash, *rightHash);
   }
-  int len = strlen(hash_string);
   uint32_t value = jenkins_one_at_a_time_hash((uint8_t *)hash_string, strlen(hash_string));
   // free(hash_string);
   return value;
